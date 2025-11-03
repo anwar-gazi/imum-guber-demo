@@ -5,14 +5,159 @@ import { jsonOrStringForDb, jsonOrStringToJson, stringOrNullForDb, stringToHash 
 import _ from "lodash"
 import { sources } from "../sites/sources"
 import items from "./../../pharmacyItems.json"
-import connections from "./../../brandConnections.json"
+import connections from "./../../brandConnections.json";
 
-type BrandsMapping = {
-    [key: string]: string[]
+type BrandsMapping = Record<string, string[]>;
+type UndirectedGraph = Map<string, Set<string>>;
+
+import externalBrandsMappingJson from "./../../brandsMapping.json";
+const externalBrandsMapping: BrandsMapping = {};
+
+/**
+ * normalize a product title
+ * @param s title
+ * @returns normalized name
+ */
+function normalizeName(s: string): string {
+    return _.deburr(String(s || "")).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Build and undirected adjacency list from brandConnections.json
+ * @param connectionsList 
+ * @returns 
+ */
+function buildGraph(connectionsList: any[]): UndirectedGraph {
+    const g = new Map<string, Set<string>>();
+
+    function addNode(n: string) {
+        if (!g.has(n)) g.set(n, new Set<string>());
+    }
+
+    function addEdge(a: string, b: string) {
+        addNode(a); addNode(b);
+        g.get(a)!.add(b);
+        g.get(b)!.add(a);
+    }
+
+    for (const row of connectionsList || []) {
+        const p1Raw = row?.manufacturer_p1;
+        const p2Raw = row?.manufacturers_p2;
+        if (!p1Raw || !p2Raw) continue;
+
+        const p1 = p1Raw.toString();
+        addNode(p1);
+
+        for (const p2 of p2Raw.toString().split(";")) {
+            const alias = p2.trim();
+            if (!alias) continue;
+            addEdge(p1, alias);
+        }
+    }
+    return g;
+}
+
+/**
+ * find connected components (each = one synonym group)
+ * Graph teaversal with BFS
+ * @param g 
+ * @returns 
+ */
+function components(g: UndirectedGraph): string[][] {
+    const seen = new Set<string>();
+    const groups: string[][] = []; // alias clusters
+
+    for (const start of g.keys()) {
+        if (seen.has(start)) continue
+        const q = [start]
+        const comp: string[] = []
+        seen.add(start)
+
+        while (q.length) {
+            const v = q.shift()!
+            comp.push(v)
+            for (const nxt of (g.get(v) || [])) {
+                if (!seen.has(nxt)) {
+                    seen.add(nxt)
+                    q.push(nxt)
+                }
+            }
+        }
+        groups.push(comp)
+    }
+    return groups;
+}
+
+/**
+ * Pick a canonical: lexicographically smallest by normalized string but return the original case name for display or storage
+ * @param names 
+ * @returns 
+ */
+function pickCanonical(names: string[]): string {
+    let best: { norm: string, raw: string } | null = null;
+    for (const raw of names) {
+        const norm = normalizeName(raw);
+        if (!best || norm < best.norm) best = {norm, raw};
+    }
+    return best? best.raw : names[0];
+}
+
+/**
+ * Merge in extra aliases from externalBrandsMapping
+ * @param canonical 
+ * @param aliases gets changed in place
+ */
+function mergeExternalAliases(canonical: string, aliases: Set<string>) {
+    // If any member appears as a key in external mapping, merge its list
+    const maybeKeys = [canonical, ...aliases]
+    for (const k of maybeKeys) {
+        const list = externalBrandsMapping[k]
+        if (Array.isArray(list)) {
+            for (const a of list) {
+                if (a && a.trim()) aliases.add(a)
+            }
+        }
+    }
+}
+
+export function getAliasToCanonical(): { [normAlias: string]: string } {
+    const m = (getBrandsMapping as any).__aliasToCanonical;
+    return m || {};
 }
 
 export async function getBrandsMapping(): Promise<BrandsMapping> {
-    const brandConnections = connections
+    // build groups from brandConnections.json which is the source of truth 
+    const brandConnections = connections as any[];
+    const g = buildGraph(brandConnections);
+    const comps = components(g);
+
+    // for each group, choose canonical and collect aliases
+    const canonicalToAliases: BrandsMapping = {};
+    const aliasToCanonical: { [normalAlias: string]: string } = {};
+
+    for (const comp of comps) {
+        const aliasSet = new Set<string>(comp.filter(Boolean).map(s => s.trim()).filter(Boolean));
+        const canonicalTmp = pickCanonical(Array.from(aliasSet));
+        mergeExternalAliases(canonicalTmp, aliasSet);
+        const canonical = pickCanonical(Array.from(aliasSet));
+        const sortedAliases = Array.from(aliasSet).sort((a, b) => {
+            const na = normalizeName(a), nb = normalizeName(b);
+            return na < nb ? -1 : na > nb ? 1 : 0;
+        });
+        canonicalToAliases[canonical] = sortedAliases;
+        for (const a of sortedAliases) {
+            aliasToCanonical[normalizeName(a)] = canonical;
+        }
+    }
+
+    ;(getBrandsMapping as any).__aliasToCanonical = aliasToCanonical
+
+    return canonicalToAliases;
+}
+
+export async function oldGetBrandsMapping(): Promise<BrandsMapping> {
+    // build groups from brandConnections.json which is the source of truth 
+    const brandConnections = connections as any[];
 
     // Create a map to track brand relationships
     const brandMap = new Map<string, Set<string>>()
