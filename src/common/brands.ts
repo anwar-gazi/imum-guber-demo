@@ -73,17 +73,22 @@ function passesPlacementAndCaseRules(rawInput: string, brandAlias: string): bool
 const MAX_NGRAM_TOKENS = 4
 
 /**
- * Tokenize a raw title for matching:
- * - Diacritic fold + lowercase (for normalized tokens)
- * - Treat spaces/hyphens/underscores as delimiters
- * - Keep token indices (0-based)
- * @param rawTitle Original title string
- * @returns Array of normalized tokens
+ * Tokenize a raw title for matching.
+ * - Diacritic fold + lowercase via normalizeName()
+ * - Treat spaces, hyphens, underscores as delimiters
+ * - Trim leading/trailing punctuation from each token (e.g., "beauty:" → "beauty")
  */
 function tokenizeForMatch(rawTitle: string): string[] {
+    // split on space; first convert hyphen/underscore to space
     const norm = normalizeName(rawTitle).replace(/[-_]/g, " ")
-    return norm.split(" ").filter(Boolean)
+    const rawTokens = norm.split(" ").filter(Boolean)
+    // strip punctuation at token edges but keep inner punctuation (so we don't break things like "ginkgo&ginseng")
+    const tokens = rawTokens
+        .map(t => t.replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, ""))
+        .filter(Boolean)
+    return tokens
 }
+
 
 /**
  * Find brand candidates using a sliding n-gram over tokens.
@@ -107,14 +112,23 @@ function findAliasCandidates(
 
     for (let i = 0; i < tokens.length; i++) {
         for (let len = 1; len <= MAX_NGRAM_TOKENS && i + len <= tokens.length; len++) {
-            const span = tokens.slice(i, i + len).join(" ")
-            const canonical = aliasToCanonical[span]
+            const spanTokens = tokens.slice(i, i + len)
+
+            // NEW: try multiple join variants to match alias index
+            const variants = [
+            spanTokens.join(" "),
+            spanTokens.join("-"),
+            spanTokens.join("_"),
+            ]
+
+            for (const variant of variants) {
+            const canonical = aliasToCanonical[variant]
             if (!canonical) continue
 
-            // Whole-word check & placement/case rules (HAPPY, front/second, stopwords)
-            const wholeWord = checkBrandIsSeparateTerm(_.deburr(rawTitle), span)
+            // Whole-word + rule gate checks use the *raw* title and the found alias string
+            const wholeWord = checkBrandIsSeparateTerm(_.deburr(rawTitle), variant)
             if (!wholeWord) continue
-            if (!passesPlacementAndCaseRules(rawTitle, span)) continue
+            if (!passesPlacementAndCaseRules(rawTitle, variant)) continue
 
             const prev = candidates.get(canonical)
             if (
@@ -124,8 +138,13 @@ function findAliasCandidates(
             ) {
                 candidates.set(canonical, { startIdx: i, spanLen: len })
             }
+
+            // Important: once a variant matched for this (i,len), no need to test other variants
+            break
+            }
         }
     }
+
     return candidates
 }
 
@@ -325,6 +344,20 @@ async function getPharmacyItems(countryCode: countryCodes, source: sources, vers
     return finalProducts
 }
 
+/**
+ * Checks if a given brand name exists as a separate, whole term within a larger input string.
+ *
+ * This function handles two scenarios for a match:
+ * 1. The brand appears at the beginning or end of the input string, followed or preceded by a space.
+ * 2. The brand appears anywhere else, surrounded by word boundaries (e.g., spaces, punctuation).
+ *
+ * It is primarily used to prevent partial word matches (e.g., preventing "sony" from matching in "sonya").
+ * The check is case-insensitive.
+ *
+ * @param input - The larger string (e.g., a search query or a product title) to be searched.
+ * @param brand - The specific brand name (term) to look for.
+ * @returns {boolean} - True if the brand is found as a distinct, separate term; otherwise, false.
+ */
 export function checkBrandIsSeparateTerm(input: string, brand: string): boolean {
     // Escape any special characters in the brand name for use in a regular expression
     const escapedBrand = brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
