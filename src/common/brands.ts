@@ -13,6 +13,12 @@ type UndirectedGraph = Map<string, Set<string>>;
 import externalBrandsMappingJson from "./../../brandsMapping.json";
 const externalBrandsMapping: BrandsMapping = {};
 
+// --- Level 2 helpers: normalization + rule gate ---
+
+const STOPWORDS = new Set(["bio", "neb"])
+const FRONT_ONLY = new Set(["rich", "rff", "flex", "ultra", "gum", "beauty", "orto", "free", "112", "kin", "happy"])
+const FRONT_OR_SECOND = new Set(["heel", "contour", "nero", "rsv"])
+
 /**
  * normalize a product title
  * @param s title
@@ -20,6 +26,46 @@ const externalBrandsMapping: BrandsMapping = {};
  */
 function normalizeName(s: string): string {
     return _.deburr(String(s || "")).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// This enforces placement, stopwords, and HAPPY uppercase.
+// rawInput is the original title (we need it for the HAPPY case).
+function passesPlacementAndCaseRules(rawInput: string, brandAlias: string): boolean {
+    const normBrand = normalizeName(brandAlias)
+    if (!normBrand) return false
+
+    // 1) Stopwords never trigger a brand
+    if (STOPWORDS.has(normBrand)) return false
+
+    // Identify the first token of the alias
+    const firstToken = normBrand.split(/[^a-z0-9]+/i).filter(Boolean)[0] || normBrand
+
+    // 2) HAPPY must be uppercase at the front of the RAW input
+    if (firstToken === "happy") {
+        // Require EXACT "HAPPY" at start (hyphen/word boundary allowed)
+        if (!/^(?:HAPPY)(?:\b|[-_])/.test(String(rawInput || ""))) return false
+        // And because "happy" is also in FRONT_ONLY, it must be at index 0 (handled below)
+    }
+
+    // Prepare a diacritic-folded raw string for placement checks (case-insensitive)
+    const fold = _.deburr(String(rawInput || ""))
+
+    // 3) Front-only tokens must be at index 0
+    if (FRONT_ONLY.has(firstToken)) {
+        // Accept start of string, followed by word boundary or hyphen/underscore
+        const re = new RegExp(`^(?:${firstToken})(?:\\b|[-_])`, "i")
+        return re.test(fold)
+    }
+
+    // 4) Front-or-second tokens (exact single-token brands)
+    //    Accept either at start, or right after the first token (hyphen or space as delimiter).
+    if (FRONT_OR_SECOND.has(normBrand)) {
+        const re = new RegExp(`^(?:${normBrand}\\b|\\S+[\\s-]+${normBrand}\\b)`, "i")
+        return re.test(fold)
+    }
+
+    // 5) Otherwise, no special placement restriction
+    return true
 }
 
 /**
@@ -234,10 +280,22 @@ export async function assignBrandIfKnown(countryCode: countryCodes, source: sour
                 if (matchedBrands.includes(brand)) {
                     continue
                 }
-                const isBrandMatch = checkBrandIsSeparateTerm(product.title, brand)
-                if (isBrandMatch) {
-                    matchedBrands.push(brand)
+
+                // Fold diacritics for boundary matching; normalize alias for boundary too
+                const inputForBoundary = _.deburr(product.title)
+                const brandForBoundary = normalizeName(brand)
+
+                // Whole-word match (cheap pre-check)
+                const wholeWord = checkBrandIsSeparateTerm(inputForBoundary, brandForBoundary)
+
+                // Placement/case rules (front-only, 1st/2nd, HAPPY uppercase, stopwords)
+                const placementOk = passesPlacementAndCaseRules(product.title, brand)
+
+                if (wholeWord && placementOk) {
+                    // Push the CANONICAL group key instead of the alias, so outputs never contain synonyms
+                    matchedBrands.push(brandKey)
                 }
+
             }
         }
         console.log(`${product.title} -> ${_.uniq(matchedBrands)}`)
