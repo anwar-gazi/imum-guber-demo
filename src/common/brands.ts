@@ -68,6 +68,91 @@ function passesPlacementAndCaseRules(rawInput: string, brandAlias: string): bool
     return true
 }
 
+// --- Level 3: tokenization, n-gram candidate search, tie-break ordering ---
+
+const MAX_NGRAM_TOKENS = 4
+
+/**
+ * Tokenize a raw title for matching:
+ * - Diacritic fold + lowercase (for normalized tokens)
+ * - Treat spaces/hyphens/underscores as delimiters
+ * - Keep token indices (0-based)
+ * @param rawTitle Original title string
+ * @returns Array of normalized tokens
+ */
+function tokenizeForMatch(rawTitle: string): string[] {
+    const norm = normalizeName(rawTitle).replace(/[-_]/g, " ")
+    return norm.split(" ").filter(Boolean)
+}
+
+/**
+ * Find brand candidates using a sliding n-gram over tokens.
+ * Applies:
+ *  - alias→canonical lookup
+ *  - whole-word boundary safeguard
+ *  - placement/case rules (Level-2 gate)
+ *
+ * For each canonical, keeps the best metrics (earliest start, then longest span).
+ *
+ * @param rawTitle Original product title (raw, not normalized)
+ * @param aliasToCanonical Map of normalized alias → canonical brand name
+ * @returns Map<canonical, { startIdx: number, spanLen: number }>
+ */
+function findAliasCandidates(
+    rawTitle: string,
+    aliasToCanonical: { [alias: string]: string }
+): Map<string, { startIdx: number; spanLen: number }> {
+    const tokens = tokenizeForMatch(rawTitle)
+    const candidates = new Map<string, { startIdx: number; spanLen: number }>()
+
+    for (let i = 0; i < tokens.length; i++) {
+        for (let len = 1; len <= MAX_NGRAM_TOKENS && i + len <= tokens.length; len++) {
+            const span = tokens.slice(i, i + len).join(" ")
+            const canonical = aliasToCanonical[span]
+            if (!canonical) continue
+
+            // Whole-word check & placement/case rules (HAPPY, front/second, stopwords)
+            const wholeWord = checkBrandIsSeparateTerm(_.deburr(rawTitle), span)
+            if (!wholeWord) continue
+            if (!passesPlacementAndCaseRules(rawTitle, span)) continue
+
+            const prev = candidates.get(canonical)
+            if (
+                !prev ||
+                i < prev.startIdx ||
+                (i === prev.startIdx && len > prev.spanLen)
+            ) {
+                candidates.set(canonical, { startIdx: i, spanLen: len })
+            }
+        }
+    }
+    return candidates
+}
+
+/**
+ * Order canonical candidates by:
+ *  1) smallest startIdx (earliest in title wins)
+ *  2) largest spanLen   (longest phrase wins)
+ *  3) lexical canonical (deterministic fallback)
+ *
+ * @param candidates Map of canonical → {startIdx, spanLen}
+ * @returns Ordered list of canonical names (best first)
+ */
+function orderCandidates(
+    candidates: Map<string, { startIdx: number; spanLen: number }>
+): string[] {
+    const rows = Array.from(candidates.entries())
+    rows.sort((a, b) => {
+        const A = a[1], B = b[1]
+        if (A.startIdx !== B.startIdx) return A.startIdx - B.startIdx
+        if (A.spanLen !== B.spanLen) return B.spanLen - A.spanLen
+        const an = normalizeName(a[0]), bn = normalizeName(b[0])
+        return an < bn ? -1 : an > bn ? 1 : 0
+    })
+    return rows.map(([canonical]) => canonical)
+}
+
+
 /**
  * Build and undirected adjacency list from brandConnections.json
  * @param connectionsList 
@@ -257,48 +342,47 @@ export function checkBrandIsSeparateTerm(input: string, brand: string): boolean 
     return atBeginningOrEnd || separateTerm
 }
 
+/**
+ * Assign a canonical brand to items using:
+ *  - Level 1: alias→canonical precomputation (built via getBrandsMapping)
+ *  - Level 2: normalization + rule gate (placement, stopwords, HAPPY)
+ *  - Level 3: n-gram candidate extraction + deterministic tie-breakers
+ *
+ * Candidate ordering:
+ *  1) earliest token index in the title (beginning wins)
+ *  2) longest alias span (more specific phrase wins)
+ *  3) lexical order of the canonical (stable fallback)
+ *
+ * Side effect: logs "<title> -> <canonical1,canonical2,...>" where the first
+ * canonical is the chosen brand. DB write is intentionally left as a TODO.
+ */
 export async function assignBrandIfKnown(countryCode: countryCodes, source: sources, job?: Job) {
     const context = { scope: "assignBrandIfKnown" } as ContextType
 
-    const brandsMapping = await getBrandsMapping()
+    // Ensure mappings are built and alias→canonical cache is primed
+    await getBrandsMapping()
+    const aliasToCanonical =
+        (getBrandsMapping as any).__aliasToCanonical || {}
 
     const versionKey = "assignBrandIfKnown"
     let products = await getPharmacyItems(countryCode, source, versionKey, false)
+
     let counter = 0
     for (let product of products) {
         counter++
 
+        // Already exists in the mapping table, probably no need to update
         if (product.m_id) {
-            // Already exists in the mapping table, probably no need to update
             continue
         }
 
-        let matchedBrands = []
-        for (const brandKey in brandsMapping) {
-            const relatedBrands = brandsMapping[brandKey]
-            for (const brand of relatedBrands) {
-                if (matchedBrands.includes(brand)) {
-                    continue
-                }
+        // --- Level 3: build and order canonical candidates ---
+        const candMap = findAliasCandidates(product.title, aliasToCanonical)
+        const orderedCanonicals = orderCandidates(candMap)
 
-                // Fold diacritics for boundary matching; normalize alias for boundary too
-                const inputForBoundary = _.deburr(product.title)
-                const brandForBoundary = normalizeName(brand)
+        const matchedBrands = orderedCanonicals
+        console.log(`${product.title} -> ${matchedBrands.join(",")}`)
 
-                // Whole-word match (cheap pre-check)
-                const wholeWord = checkBrandIsSeparateTerm(inputForBoundary, brandForBoundary)
-
-                // Placement/case rules (front-only, 1st/2nd, HAPPY uppercase, stopwords)
-                const placementOk = passesPlacementAndCaseRules(product.title, brand)
-
-                if (wholeWord && placementOk) {
-                    // Push the CANONICAL group key instead of the alias, so outputs never contain synonyms
-                    matchedBrands.push(brandKey)
-                }
-
-            }
-        }
-        console.log(`${product.title} -> ${_.uniq(matchedBrands)}`)
         const sourceId = product.source_id
         const meta = { matchedBrands }
         const brand = matchedBrands.length ? matchedBrands[0] : null
@@ -306,6 +390,7 @@ export async function assignBrandIfKnown(countryCode: countryCodes, source: sour
         const key = `${source}_${countryCode}_${sourceId}`
         const uuid = stringToHash(key)
 
-        // Then brand is inserted into product mapping table
+        // TODO: insert/update mapping table record with:
+        // { uuid, source, countryCode, sourceId, brand, meta }
     }
 }
