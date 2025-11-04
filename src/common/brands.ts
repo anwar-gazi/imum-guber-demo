@@ -427,3 +427,93 @@ export async function assignBrandIfKnown(countryCode: countryCodes, source: sour
         // { uuid, source, countryCode, sourceId, brand, meta }
     }
 }
+
+
+// --- Level 5: dry-run metrics reporter ---
+
+/**
+ * One product's evaluation row for the dry-run report.
+ */
+export interface BrandDryRunRow {
+    title: string
+    matches: string[]          // ordered canonicals (best→worst)
+    chosen: string | null      // first of `matches` or null
+    source_id?: string
+}
+
+/**
+ * Aggregated metrics over a dry-run evaluation.
+ */
+export interface BrandDryRunReport {
+    total: number
+    assigned: number
+    uniqueBrands: number
+    byBrand: Array<{ brand: string; count: number }>  // sorted desc
+    rows: BrandDryRunRow[]                            // optional: inspect if needed
+}
+
+/**
+ * Evaluate all items without writing to DB:
+ * - Builds alias→canonical (Level 1) if needed
+ * - Applies rule gate (Level 2) and n-gram tie-breakers (Level 3)
+ * - Returns coverage, unique brand count, and top brands
+ */
+export async function dryRunBrandAssignment(
+    countryCode: countryCodes,
+    source: sources
+): Promise<BrandDryRunReport> {
+    // ensure caches are warm
+    await getBrandsMapping()
+    const aliasToCanonical =
+        (getBrandsMapping as any).__aliasToCanonical || {}
+
+    const products = await getPharmacyItems(countryCode, source, "dryRun", false)
+    const rows: BrandDryRunRow[] = []
+    const seenBrand = new Map<string, number>()
+
+    for (const product of products) {
+        const candMap = findAliasCandidates(product.title, aliasToCanonical)
+        const ordered = orderCandidates(candMap)
+        const chosen = ordered.length ? ordered[0] : null
+
+        if (chosen) {
+            seenBrand.set(chosen, (seenBrand.get(chosen) || 0) + 1)
+        }
+        rows.push({
+            title: product.title,
+            matches: ordered,
+            chosen,
+            source_id: (product as any)?.source_id
+        })
+    }
+
+    const byBrand = Array.from(seenBrand.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([brand, count]) => ({ brand, count }))
+
+    return {
+        total: products.length,
+        assigned: rows.filter(r => !!r.chosen).length,
+        uniqueBrands: seenBrand.size,
+        byBrand,
+        rows
+    }
+}
+
+/**
+ * Pretty-print the dry-run report to console.
+ */
+export function printBrandDryRunReport(r: BrandDryRunReport): void {
+    console.log("=== Brand Assignment Report (dry-run) ===")
+    console.log(`Items: ${r.assigned}/${r.total} assigned  |  Unique brands: ${r.uniqueBrands}`)
+    const top = r.byBrand.slice(0, 10)
+    if (top.length) {
+        console.log("Top brands:")
+        for (const { brand, count } of top) {
+            console.log(`  - ${brand}: ${count}`)
+        }
+    } else {
+        console.log("No brands assigned.")
+    }
+}
+
