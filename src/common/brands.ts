@@ -145,31 +145,31 @@ function findAliasCandidates(
 
             // NEW: try multiple join variants to match alias index
             const variants = [
-            spanTokens.join(" "),
-            spanTokens.join("-"),
-            spanTokens.join("_"),
+                spanTokens.join(" "),
+                spanTokens.join("-"),
+                spanTokens.join("_"),
             ]
 
             for (const variant of variants) {
-            const canonical = aliasToCanonical[variant]
-            if (!canonical) continue
+                const canonical = aliasToCanonical[variant]
+                if (!canonical) continue
 
-            // Whole-word + rule gate checks use the *raw* title and the found alias string
-            const wholeWord = checkBrandIsSeparateTerm(_.deburr(rawTitle), variant)
-            if (!wholeWord) continue
-            if (!passesPlacementAndCaseRules(rawTitle, variant)) continue
+                // Whole-word + rule gate checks use the *raw* title and the found alias string
+                const wholeWord = checkBrandIsSeparateTerm(_.deburr(rawTitle), variant)
+                if (!wholeWord) continue
+                if (!passesPlacementAndCaseRules(rawTitle, variant)) continue
 
-            const prev = candidates.get(canonical)
-            if (
-                !prev ||
-                i < prev.startIdx ||
-                (i === prev.startIdx && len > prev.spanLen)
-            ) {
-                candidates.set(canonical, { startIdx: i, spanLen: len })
-            }
+                const prev = candidates.get(canonical)
+                if (
+                    !prev ||
+                    i < prev.startIdx ||
+                    (i === prev.startIdx && len > prev.spanLen)
+                ) {
+                    candidates.set(canonical, { startIdx: i, spanLen: len })
+                }
 
-            // Important: once a variant matched for this (i,len), no need to test other variants
-            break
+                // Important: once a variant matched for this (i,len), no need to test other variants
+                break
             }
         }
     }
@@ -276,9 +276,9 @@ function pickCanonical(names: string[]): string {
     let best: { norm: string, raw: string } | null = null;
     for (const raw of names) {
         const norm = normalizeName(raw);
-        if (!best || norm < best.norm) best = {norm, raw};
+        if (!best || norm < best.norm) best = { norm, raw };
     }
-    return best? best.raw : names[0];
+    return best ? best.raw : names[0];
 }
 
 /**
@@ -329,42 +329,9 @@ export async function getBrandsMapping(): Promise<BrandsMapping> {
         }
     }
 
-    ;(getBrandsMapping as any).__aliasToCanonical = aliasToCanonical
+    ; (getBrandsMapping as any).__aliasToCanonical = aliasToCanonical
 
     return canonicalToAliases;
-}
-
-export async function oldGetBrandsMapping(): Promise<BrandsMapping> {
-    // build groups from brandConnections.json which is the source of truth 
-    const brandConnections = connections as any[];
-
-    // Create a map to track brand relationships
-    const brandMap = new Map<string, Set<string>>()
-
-    brandConnections.forEach(({ manufacturer_p1, manufacturers_p2 }) => {
-        const brand1 = manufacturer_p1.toLowerCase()
-        const brands2 = manufacturers_p2.toLowerCase()
-        const brand2Array = brands2.split(";").map((b) => b.trim())
-        if (!brandMap.has(brand1)) {
-            brandMap.set(brand1, new Set())
-        }
-        brand2Array.forEach((brand2) => {
-            if (!brandMap.has(brand2)) {
-                brandMap.set(brand2, new Set())
-            }
-            brandMap.get(brand1)!.add(brand2)
-            brandMap.get(brand2)!.add(brand1)
-        })
-    })
-
-    // Convert the flat map to an object for easier usage
-    const flatMapObject: Record<string, string[]> = {}
-
-    brandMap.forEach((relatedBrands, brand) => {
-        flatMapObject[brand] = Array.from(relatedBrands)
-    })
-
-    return flatMapObject
 }
 
 async function getPharmacyItems(countryCode: countryCodes, source: sources, versionKey: string, mustExist = true) {
