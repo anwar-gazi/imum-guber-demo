@@ -5,13 +5,42 @@ import { jsonOrStringForDb, jsonOrStringToJson, stringOrNullForDb, stringToHash 
 import _ from "lodash"
 import { sources } from "../sites/sources"
 import items from "./../../pharmacyItems.json"
-import connections from "./../../brandConnections.json";
 
 type BrandsMapping = Record<string, string[]>;
 type UndirectedGraph = Map<string, Set<string>>;
+type ExternalBrandsMapping = Record<string, string[]>;
+type BrandConnections = {
+    manufacturer_p1: string,
+    manufacturers_p2: string
+};
 
-import externalBrandsMappingJson from "./../../brandsMapping.json";
-const externalBrandsMapping: BrandsMapping = {};
+let connections: BrandConnections[];
+try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    connections = require("./../../brandConnections.json")
+    if (!connections || typeof connections !== "object") {
+        throw new Error("brandConnections.json exists but is not a valid JSON object")
+    }
+} catch (e) {
+    throw new Error(
+        "brandConnections.json is required but was not found. " +
+        "Place it at project root and ensure it exports an object { aliasKey: string[] }."
+    )
+}
+
+let externalBrandsMapping: ExternalBrandsMapping;
+try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    externalBrandsMapping = require("./../../brandsMapping.json")
+    if (!externalBrandsMapping || typeof externalBrandsMapping !== "object") {
+        throw new Error("brandsMapping.json exists but is not a valid JSON object")
+    }
+} catch (e) {
+    throw new Error(
+        "brandsMapping.json is required but was not found. " +
+        "Place it at project root and ensure it exports an object { aliasKey: string[] }."
+    )
+}
 
 // --- Level 2 helpers: normalization + rule gate ---
 
